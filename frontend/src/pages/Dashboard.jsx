@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate }                       from 'react-router-dom';
-import axios                                 from 'axios';
-
-axios.defaults.withCredentials = true;
+import { useNavigate, useSearchParams }    from 'react-router-dom';
+import axios                                from 'axios';
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+
+// Helper to get auth headers from localStorage
+const getHeaders = () => ({
+  'x-sf-token':        localStorage.getItem('sf_token')        || '',
+  'x-sf-instance-url': localStorage.getItem('sf_instance_url') || '',
+});
 
 // ── Toast notification ────────────────────────────────────────────
 function Toast({ msg, type, onClose }) {
@@ -19,7 +23,7 @@ function Toast({ msg, type, onClose }) {
     warning: 'bg-yellow-600',
   };
   return (
-    <div className={`fixed top-5 right-5 z-50 flex items-center gap-3 px-5 py-3 rounded-xl text-white text-sm shadow-2xl animate-bounce-in ${colors[type] || colors.info}`}>
+    <div className={`fixed top-5 right-5 z-50 flex items-center gap-3 px-5 py-3 rounded-xl text-white text-sm shadow-2xl ${colors[type] || colors.info}`}>
       <span>{msg}</span>
       <button onClick={onClose} className="ml-2 text-white/70 hover:text-white text-xl leading-none">×</button>
     </div>
@@ -34,7 +38,8 @@ function Spin({ size = 4 }) {
 }
 
 export default function Dashboard() {
-  const navigate = useNavigate();
+  const navigate       = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [user, setUser]           = useState(null);
   const [rules, setRules]         = useState([]);
@@ -42,37 +47,58 @@ export default function Dashboard() {
   const [deploying, setDeploying] = useState(false);
   const [fetched, setFetched]     = useState(false);
   const [object, setObject]       = useState('Account');
-  const [pending, setPending]     = useState(new Map()); // ruleId -> active (bool)
+  const [pending, setPending]     = useState(new Map());
   const [toast, setToast]         = useState(null);
   const [search, setSearch]       = useState('');
   const [filter, setFilter]       = useState('all');
 
   const showToast = (msg, type = 'info') => setToast({ msg, type });
 
-  // ── Check auth on load ────────────────────────────────────────
+  // ── On load: read URL params from OAuth or localStorage ───────
   useEffect(() => {
-    axios.get(`${BACKEND}/auth/status`)
-      .then(r => {
-        if (!r.data.loggedIn) {
-          navigate('/');
-        } else {
-          setUser(r.data);
-        }
-      })
-      .catch(() => navigate('/'));
+    const token       = searchParams.get('token');
+    const instanceUrl = searchParams.get('instanceUrl');
+    const username    = searchParams.get('username');
+    const email       = searchParams.get('email');
+    const orgId       = searchParams.get('orgId');
+
+    if (token && instanceUrl) {
+      // Came from OAuth callback — save to localStorage
+      localStorage.setItem('sf_token',        token);
+      localStorage.setItem('sf_instance_url', instanceUrl);
+      localStorage.setItem('sf_username',     username || '');
+      localStorage.setItem('sf_email',        email    || '');
+      localStorage.setItem('sf_org_id',       orgId    || '');
+      setUser({ username, email, instanceUrl, orgId });
+      // Clean URL params
+      navigate('/dashboard', { replace: true });
+    } else {
+      // Check localStorage
+      const savedToken = localStorage.getItem('sf_token');
+      if (savedToken) {
+        setUser({
+          username:    localStorage.getItem('sf_username'),
+          email:       localStorage.getItem('sf_email'),
+          instanceUrl: localStorage.getItem('sf_instance_url'),
+          orgId:       localStorage.getItem('sf_org_id'),
+        });
+      } else {
+        navigate('/');
+      }
+    }
   }, []);
 
-  // ── Get effective active status (pending overrides original) ──
+  // ── Get effective active status ────────────────────────────────
   const getActive = (rule) =>
     pending.has(rule.Id) ? pending.get(rule.Id) : rule.Active;
 
-  // ── Fetch rules from user's own Salesforce org ────────────────
+  // ── Fetch rules ────────────────────────────────────────────────
   const fetchRules = useCallback(async () => {
     setLoading(true);
     setPending(new Map());
     setFetched(false);
     try {
-      const r = await axios.get(`${BACKEND}/api/rules?object=${object}`);
+      const r = await axios.get(`${BACKEND}/api/rules?object=${object}`, { headers: getHeaders() });
       setRules(r.data.rules || []);
       setFetched(true);
       showToast(
@@ -84,6 +110,7 @@ export default function Dashboard() {
     } catch (e) {
       if (e.response?.data?.needsLogin) {
         showToast('Session expired. Please login again.', 'error');
+        localStorage.clear();
         setTimeout(() => navigate('/'), 2000);
       } else {
         showToast(e.response?.data?.error || 'Failed to fetch rules', 'error');
@@ -93,36 +120,27 @@ export default function Dashboard() {
     }
   }, [object]);
 
-  // ── Toggle a single rule (local only, not deployed yet) ───────
+  // ── Toggle a single rule (local only) ──────────────────────────
   const toggle = (rule) => {
-    const current = getActive(rule);
-    const next    = !current;
+    const next = !getActive(rule);
     setPending(prev => {
       const m = new Map(prev);
-      // If toggled back to original value, remove from pending
       if (next === rule.Active) m.delete(rule.Id);
       else m.set(rule.Id, next);
       return m;
     });
   };
 
-  // ── Stage all rules to enabled or disabled ────────────────────
+  // ── Stage all rules ────────────────────────────────────────────
   const stageAll = (active) => {
     const m = new Map();
-    rules.forEach(r => {
-      if (r.Active !== active) m.set(r.Id, active);
-    });
-    if (m.size === 0) {
-      return showToast(`All rules are already ${active ? 'active' : 'inactive'}`, 'info');
-    }
+    rules.forEach(r => { if (r.Active !== active) m.set(r.Id, active); });
+    if (m.size === 0) return showToast(`All rules are already ${active ? 'active' : 'inactive'}`, 'info');
     setPending(m);
-    showToast(
-      `${m.size} rules staged to ${active ? 'enable' : 'disable'} — click Deploy to apply`,
-      'info'
-    );
+    showToast(`${m.size} rules staged to ${active ? 'enable' : 'disable'} — click Deploy to apply`, 'info');
   };
 
-  // ── Deploy all pending changes to Salesforce ──────────────────
+  // ── Deploy changes to Salesforce ───────────────────────────────
   const deploy = async () => {
     if (!pending.size) return showToast('No changes to deploy', 'info');
     if (!confirm(`Deploy ${pending.size} change(s) to your Salesforce org?`)) return;
@@ -131,30 +149,20 @@ export default function Dashboard() {
     const changes = Array.from(pending.entries()).map(([ruleId, active]) => ({ ruleId, active }));
 
     try {
-      const r = await axios.post(`${BACKEND}/api/deploy`, { changes });
+      const r = await axios.post(`${BACKEND}/api/deploy`, { changes }, { headers: getHeaders() });
 
       if (r.data.ok) {
-        // Update local rules to reflect deployed state
-        setRules(prev =>
-          prev.map(rule =>
-            pending.has(rule.Id)
-              ? { ...rule, Active: pending.get(rule.Id) }
-              : rule
-          )
-        );
+        setRules(prev => prev.map(rule =>
+          pending.has(rule.Id) ? { ...rule, Active: pending.get(rule.Id) } : rule
+        ));
         setPending(new Map());
         showToast(r.data.message, 'success');
       } else {
         showToast(`Partial deploy: ${r.data.message}`, 'warning');
-        // Update successful ones
         const successIds = new Set(r.data.results.map(r => r.ruleId));
-        setRules(prev =>
-          prev.map(rule =>
-            successIds.has(rule.Id)
-              ? { ...rule, Active: pending.get(rule.Id) }
-              : rule
-          )
-        );
+        setRules(prev => prev.map(rule =>
+          successIds.has(rule.Id) ? { ...rule, Active: pending.get(rule.Id) } : rule
+        ));
         setPending(prev => {
           const m = new Map(prev);
           successIds.forEach(id => m.delete(id));
@@ -168,14 +176,14 @@ export default function Dashboard() {
     }
   };
 
-  // ── Logout ────────────────────────────────────────────────────
-  const logout = async () => {
+  // ── Logout ─────────────────────────────────────────────────────
+  const logout = () => {
     if (!confirm('Are you sure you want to logout?')) return;
-    await axios.post(`${BACKEND}/auth/logout`).catch(() => {});
+    localStorage.clear();
     navigate('/');
   };
 
-  // ── Filter rules by search and status ────────────────────────
+  // ── Filtered rules ─────────────────────────────────────────────
   const shown = rules.filter(r => {
     const q      = search.toLowerCase();
     const matchQ = (r.ValidationName || '').toLowerCase().includes(q) ||
@@ -189,13 +197,10 @@ export default function Dashboard() {
   const activeCount   = rules.filter(r => getActive(r)).length;
   const inactiveCount = rules.length - activeCount;
 
-  // ── Render ────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gray-100">
 
-      {toast && (
-        <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)} />
-      )}
+      {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
 
       {/* ── Navbar ───────────────────────────────────────────── */}
       <nav className="bg-[#032D60] text-white px-6 py-4 flex items-center justify-between shadow-xl">
@@ -210,7 +215,6 @@ export default function Dashboard() {
 
         {user && (
           <div className="flex items-center gap-4">
-            {/* User info */}
             <div className="hidden sm:flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-full">
               <div className="w-6 h-6 bg-[#00A1E0] rounded-full flex items-center justify-center text-xs font-bold uppercase">
                 {user.username?.charAt(0) || 'U'}
@@ -223,13 +227,11 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Connected indicator */}
             <div className="hidden sm:flex items-center gap-1.5 bg-green-900/40 px-2.5 py-1 rounded-full">
               <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
               <span className="text-xs text-green-300 font-medium">Connected</span>
             </div>
 
-            {/* Logout */}
             <button
               onClick={logout}
               className="flex items-center gap-1.5 text-sm text-blue-200 hover:text-white bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-lg transition-colors"
@@ -257,7 +259,6 @@ export default function Dashboard() {
           </div>
 
           <div className="flex flex-wrap gap-3 items-end">
-            {/* Object selector */}
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">
                 Salesforce Object
@@ -281,7 +282,6 @@ export default function Dashboard() {
               </select>
             </div>
 
-            {/* Fetch button */}
             <button
               onClick={fetchRules}
               disabled={loading}
@@ -295,7 +295,6 @@ export default function Dashboard() {
               }
             </button>
 
-            {/* Enable / Disable All — only when rules loaded */}
             {fetched && rules.length > 0 && (
               <>
                 <button
@@ -315,7 +314,6 @@ export default function Dashboard() {
               </>
             )}
 
-            {/* Discard + Deploy — only when pending changes */}
             {pending.size > 0 && (
               <>
                 <button
@@ -340,7 +338,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* ── Pending changes banner ────────────────────────── */}
+        {/* ── Pending banner ────────────────────────────────── */}
         {pending.size > 0 && !deploying && (
           <div className="mb-4 bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 flex items-center gap-2 text-sm text-yellow-800">
             ⏳
@@ -359,7 +357,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ── Empty state (before first fetch) ─────────────── */}
+        {/* ── Empty state ───────────────────────────────────── */}
         {!fetched && !loading && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 py-24 text-center">
             <p className="text-6xl mb-4">☁️</p>
@@ -380,27 +378,17 @@ export default function Dashboard() {
         {fetched && !loading && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
 
-            {/* Table header with stats + search + filter */}
             <div className="px-5 py-4 border-b border-gray-100 flex flex-wrap gap-3 items-center justify-between">
               <div className="flex gap-5 text-sm text-gray-500">
-                <span>
-                  Total: <strong className="text-gray-800">{rules.length}</strong>
-                </span>
-                <span>
-                  Active: <strong className="text-green-600">{activeCount}</strong>
-                </span>
-                <span>
-                  Inactive: <strong className="text-gray-500">{inactiveCount}</strong>
-                </span>
+                <span>Total: <strong className="text-gray-800">{rules.length}</strong></span>
+                <span>Active: <strong className="text-green-600">{activeCount}</strong></span>
+                <span>Inactive: <strong className="text-gray-500">{inactiveCount}</strong></span>
                 {pending.size > 0 && (
-                  <span>
-                    Pending: <strong className="text-yellow-600">{pending.size}</strong>
-                  </span>
+                  <span>Pending: <strong className="text-yellow-600">{pending.size}</strong></span>
                 )}
               </div>
 
               <div className="flex gap-2">
-                {/* Search */}
                 <input
                   type="text"
                   placeholder="Search rules..."
@@ -408,16 +396,13 @@ export default function Dashboard() {
                   onChange={e => setSearch(e.target.value)}
                   className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 w-44"
                 />
-                {/* Filter */}
                 <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm">
                   {['all', 'active', 'inactive'].map(f => (
                     <button
                       key={f}
                       onClick={() => setFilter(f)}
                       className={`px-3 py-1.5 capitalize transition-colors ${
-                        filter === f
-                          ? 'bg-blue-600 text-white'
-                          : 'text-gray-600 hover:bg-gray-50'
+                        filter === f ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'
                       }`}
                     >
                       {f}
@@ -427,7 +412,6 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* No rules found */}
             {rules.length === 0 && (
               <div className="py-20 text-center text-gray-400">
                 <p className="text-4xl mb-3">📋</p>
@@ -438,7 +422,6 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Table */}
             {rules.length > 0 && (
               <table className="w-full">
                 <thead>
@@ -457,16 +440,11 @@ export default function Dashboard() {
                     return (
                       <tr
                         key={rule.Id}
-                        className={`transition-colors hover:bg-gray-50 ${
-                          isModified ? 'bg-yellow-50/50' : ''
-                        }`}
+                        className={`transition-colors hover:bg-gray-50 ${isModified ? 'bg-yellow-50/50' : ''}`}
                       >
-                        {/* Rule name */}
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-2">
-                            <span className="text-sm font-semibold text-gray-900">
-                              {rule.ValidationName}
-                            </span>
+                            <span className="text-sm font-semibold text-gray-900">{rule.ValidationName}</span>
                             {isModified && (
                               <span className="text-xs bg-yellow-100 text-yellow-700 border border-yellow-200 px-1.5 py-0.5 rounded font-medium">
                                 Modified
@@ -475,30 +453,23 @@ export default function Dashboard() {
                           </div>
                         </td>
 
-                        {/* Description */}
                         <td className="px-6 py-4">
                           <p className="text-sm text-gray-500 max-w-xs truncate">
-                            {rule.Description || (
-                              <span className="italic text-gray-300">No description</span>
-                            )}
+                            {rule.Description || <span className="italic text-gray-300">No description</span>}
                           </p>
                         </td>
 
-                        {/* Status badge */}
                         <td className="px-6 py-4 text-center">
                           <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${
                             active
                               ? 'bg-green-50 text-green-700 border-green-200'
                               : 'bg-gray-100 text-gray-500 border-gray-200'
                           }`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${
-                              active ? 'bg-green-500' : 'bg-gray-400'
-                            }`} />
+                            <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-green-500' : 'bg-gray-400'}`} />
                             {active ? 'Active' : 'Inactive'}
                           </span>
                         </td>
 
-                        {/* Toggle switch */}
                         <td className="px-6 py-4 text-center">
                           <button
                             onClick={() => toggle(rule)}
@@ -520,14 +491,12 @@ export default function Dashboard() {
               </table>
             )}
 
-            {/* No search results */}
             {shown.length === 0 && rules.length > 0 && (
               <div className="py-12 text-center text-gray-400 text-sm">
                 No rules match your search or filter
               </div>
             )}
 
-            {/* Footer */}
             {rules.length > 0 && (
               <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
                 <span>Showing {shown.length} of {rules.length} rules</span>
