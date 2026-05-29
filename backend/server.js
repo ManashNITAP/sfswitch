@@ -7,6 +7,11 @@ const session = require('express-session');
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
+// ── TRUST PROXY (required for Render) ────────────────────────────
+// Tells Express the app is behind Render's HTTPS proxy
+// Without this, secure cookies don't work
+app.set('trust proxy', 1);
+
 // ── CORS ──────────────────────────────────────────────────────────
 app.use(cors({
   origin:      process.env.FRONTEND_URL || 'http://localhost:5173',
@@ -17,15 +22,15 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ── SESSION ───────────────────────────────────────────────────────
-// Each user gets their own session with their own SF token
 app.use(session({
   secret:            process.env.SESSION_SECRET || 'secret',
   resave:            true,
   saveUninitialized: true,
+  proxy:             true,  // Required for Render's HTTPS proxy
   cookie: {
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
-    maxAge:   8 * 60 * 60 * 1000, // 8 hours
+    maxAge:   8 * 60 * 60 * 1000,
     sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
   },
 }));
