@@ -7,9 +7,7 @@ const session = require('express-session');
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
-// ── TRUST PROXY (required for Render) ────────────────────────────
-// Tells Express the app is behind Render's HTTPS proxy
-// Without this, secure cookies don't work
+// ⬇️ NEW LINE — trust Render's proxy
 app.set('trust proxy', 1);
 
 // ── CORS ──────────────────────────────────────────────────────────
@@ -26,7 +24,7 @@ app.use(session({
   secret:            process.env.SESSION_SECRET || 'secret',
   resave:            true,
   saveUninitialized: true,
-  proxy:             true,  // Required for Render's HTTPS proxy
+  proxy:             true,  // ⬅️ NEW LINE — required for Render
   cookie: {
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
