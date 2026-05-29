@@ -13,7 +13,7 @@ router.get('/auth/login', (req, res) => {
   });
 
   const authUrl = `${loginUrl}/services/oauth2/authorize?${params.toString()}`;
-  console.log('🔀 Redirecting to Salesforce login...');
+  console.log('🔀 Redirecting to Salesforce...');
   res.redirect(authUrl);
 });
 
@@ -23,25 +23,16 @@ router.get('/oauth/callback', async (req, res) => {
   const { code, error, error_description } = req.query;
 
   if (error) {
-    console.error('SF OAuth error:', error_description);
     return res.redirect(`${front}?error=${encodeURIComponent(error_description || error)}`);
   }
 
   if (!code) {
-    return res.redirect(`${front}?error=No+authorization+code+received`);
+    return res.redirect(`${front}?error=No+code+received`);
   }
 
   try {
     const loginUrl = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
     const tokenUrl = `${loginUrl}/services/oauth2/token`;
-
-    // DEBUG LOGGING
-    console.log('=== TOKEN EXCHANGE DEBUG ===');
-    console.log('SF_LOGIN_URL:', process.env.SF_LOGIN_URL);
-    console.log('Token URL:', tokenUrl);
-    console.log('Client ID exists:', !!process.env.SF_CLIENT_ID);
-    console.log('Client Secret exists:', !!process.env.SF_CLIENT_SECRET);
-    console.log('Redirect URI:', process.env.SF_REDIRECT_URI);
 
     const body = new URLSearchParams({
       grant_type:    'authorization_code',
@@ -58,10 +49,8 @@ router.get('/oauth/callback', async (req, res) => {
     });
     const tokenData = await tokenRes.json();
 
-    console.log('Token response status:', tokenRes.status);
-
     if (!tokenRes.ok || tokenData.error) {
-      throw new Error(tokenData.error_description || tokenData.error || 'Token exchange failed');
+      throw new Error(tokenData.error_description || tokenData.error);
     }
 
     // Get user info
@@ -70,43 +59,27 @@ router.get('/oauth/callback', async (req, res) => {
     });
     const userInfo = await userRes.json();
 
-    // Save in session
-    req.session.accessToken  = tokenData.access_token;
-    req.session.refreshToken = tokenData.refresh_token;
-    req.session.instanceUrl  = tokenData.instance_url;
-    req.session.username     = userInfo.name || userInfo.preferred_username || '';
-    req.session.email        = userInfo.email || '';
-    req.session.orgId        = userInfo.organization_id || '';
+    // Pass token to frontend via URL params
+    const params = new URLSearchParams({
+      token:       tokenData.access_token,
+      instanceUrl: tokenData.instance_url,
+      username:    userInfo.name || userInfo.preferred_username || '',
+      email:       userInfo.email || '',
+      orgId:       userInfo.organization_id || '',
+    });
 
-    console.log(`✅ User logged in: ${req.session.username}`);
-
-    req.session.save(() => res.redirect(`${front}/dashboard`));
+    console.log(`✅ User logged in: ${userInfo.name}`);
+    res.redirect(`${front}/dashboard?${params.toString()}`);
 
   } catch (err) {
-    console.error('OAuth callback error:', err.message);
-    console.error('Full error:', err);
+    console.error('OAuth error:', err.message);
     res.redirect(`${front}?error=${encodeURIComponent(err.message)}`);
-  }
-});
-
-// ── GET /auth/status ──────────────────────────────────────────────
-router.get('/auth/status', (req, res) => {
-  if (req.session && req.session.accessToken) {
-    res.json({
-      loggedIn:    true,
-      username:    req.session.username,
-      email:       req.session.email,
-      instanceUrl: req.session.instanceUrl,
-      orgId:       req.session.orgId,
-    });
-  } else {
-    res.json({ loggedIn: false });
   }
 });
 
 // ── POST /auth/logout ─────────────────────────────────────────────
 router.post('/auth/logout', (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  res.json({ ok: true });
 });
 
 module.exports = router;
